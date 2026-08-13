@@ -12,7 +12,7 @@
     {
       "binding": "DB",
       "database_name": "pdbos-production",
-      "database_id": "REPLACE_WITH_PRODUCTION_D1_ID"
+      "database_id": "1d5e97b1-6f69-4a2b-a13e-1f9b28d2986f"
     }
   ]
 }

@@ -20,7 +20,7 @@ RESOURCE → ASSET → DISCOVERY → LEAD → INTELLIGENCE → OUTREACH → DEMO
 
 ## URLs
 
-- **Production**: _(set after Cloudflare Pages deploy)_
+- **Production**: https://pdbos.pages.dev
 - **GitHub**: https://github.com/Sparkmind-obp-off/PDBOS.Prsnal.Dgtal.Bsns.OS
 - **Local dev**: http://localhost:3000
 - **Health check**: `GET /api/health`
@@ -99,7 +99,7 @@ Leads / activities / discovery
 ```
 GET    /api/leads                  ?q&status&priority&source&city&page&per_page
 POST   /api/leads                  · GET|PATCH|DELETE /api/leads/:id
-POST   /api/leads/:id/score
+POST   /api/leads/:id/rescore
 GET    /api/activities             ?entity_type&entity_id
 POST   /api/activities             { entity_type, entity_id, type, description }
 GET    /api/discovery/runs
@@ -180,12 +180,22 @@ Useful scripts: `db:migrate:local`, `db:seed`, `db:reset`, `db:console:local`, `
 ## Deployment
 
 - **Platform**: Cloudflare Pages (Workers runtime) + D1
-- **Status**: local Phase 0 verified; production deploy via Cloudflare BYOK
-- **Before first deploy**: create the D1 database and put its id in `wrangler.jsonc`
+- **Status**: ✅ live at https://pdbos.pages.dev — Phase 0 verified against the production database
+- **Pages project**: `pdbos` (production branch `main`)
+- **D1 (production)**: `pdbos-production`, all 3 migrations applied, 42 business tables
+
+Redeploy:
 
 ```bash
-npx wrangler d1 create pdbos-production          # copy database_id into wrangler.jsonc
-npx wrangler d1 migrations apply pdbos-production # production schema
+npm run build && npx wrangler pages deploy dist --project-name pdbos
+```
+
+First-time setup on a fresh Cloudflare account:
+
+```bash
+npx wrangler d1 create pdbos-production                    # copy database_id into wrangler.jsonc
+npx wrangler d1 migrations apply pdbos-production --remote  # production schema
+npx wrangler pages project create pdbos --production-branch main
 npm run build && npx wrangler pages deploy dist --project-name pdbos
 ```
 
