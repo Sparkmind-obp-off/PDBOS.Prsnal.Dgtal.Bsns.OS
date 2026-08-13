@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pdbos",
+  "compatibility_date": "2024-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "pages_build_output_dir": "./dist",
+
+  // D1 — real relational database for PDBOS.
+  // Production database is created with: npx wrangler d1 create pdbos-production
+  // Local dev uses an automatic local SQLite mirror via the --local flag.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pdbos-production",
+      "database_id": "REPLACE_WITH_PRODUCTION_D1_ID"
+    }
+  ]
+}
