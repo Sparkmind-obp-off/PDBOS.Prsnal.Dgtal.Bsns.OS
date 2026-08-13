@@ -21,7 +21,7 @@ import { ROLES, PERMISSIONS } from './services/rbac'
 import {
   LEAD_STATUSES, LEAD_PRIORITIES, RESOURCE_TYPES, RESOURCE_STATUSES,
   RESOURCE_COST_TYPES, ASSET_TYPES, ASSET_STATUSES, ACTIVITY_TYPES,
-  ACTIVITY_ENTITIES, NOTIFICATION_TYPES, AI_OPERATIONS
+  ACTIVITY_ENTITIES, NOTIFICATION_TYPES, AI_OPERATIONS, USER_STATUSES
 } from './types'
 
 import authRoutes from './routes/auth'
@@ -32,6 +32,7 @@ import assetRoutes from './routes/assets'
 import integrationRoutes from './routes/integrations'
 import discoveryRoutes from './routes/discovery'
 import crmRoutes from './routes/crm'
+import teamRoutes from './routes/team'
 import systemRoutes from './routes/system'
 
 import { appShell } from './views/shell'
@@ -111,6 +112,7 @@ app.get('/api/meta', (c) => {
     invoice_statuses: ['DRAFT', 'SENT', 'PARTIAL', 'PAID', 'OVERDUE', 'VOID'],
     expense_categories: ['TOOL', 'API', 'MARKETING', 'OPS', 'OTHER'],
     recurring_options: ['NONE', 'MONTHLY', 'YEARLY'],
+    user_statuses: USER_STATUSES,
     roles: ROLES.map((r) => ({ key: r.key, name: r.name, description: r.description })),
     permissions: PERMISSIONS.map((p) => p.key)
   })
@@ -125,6 +127,7 @@ app.route('/api/resources', resourceRoutes)
 app.route('/api/assets', assetRoutes)
 app.route('/api/integrations', integrationRoutes)
 app.route('/api/discovery', discoveryRoutes)
+app.route('/api/team', teamRoutes)
 app.route('/api', crmRoutes)      // clients, projects, tasks, sales, money, analytics
 app.route('/api', systemRoutes)   // dashboard, search, notifications, settings, audit, ai, demo-data
 

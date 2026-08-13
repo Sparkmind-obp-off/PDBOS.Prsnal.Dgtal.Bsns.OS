@@ -72,6 +72,9 @@ export const AUDIT_ACTIONS = [
 export const ROLE_KEYS = ['OWNER', 'ADMIN', 'OPERATOR', 'SALES', 'DELIVERY', 'VIEWER'] as const
 export type RoleKey = typeof ROLE_KEYS[number]
 
+export const USER_STATUSES = ['ACTIVE', 'SUSPENDED'] as const
+export type UserStatus = typeof USER_STATUSES[number]
+
 export const AI_OPERATIONS = [
   'research', 'summarize', 'analyze', 'score', 'classify',
   'generate', 'personalize', 'recommend', 'plan'

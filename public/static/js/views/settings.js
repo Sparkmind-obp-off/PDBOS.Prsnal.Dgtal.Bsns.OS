@@ -7,8 +7,8 @@
  */
 import {
   api, store, esc, badge, fmtNumber, fmtDateTime, fmtRelative, titleCase, initials,
-  options, formValues, confirmDialog,
-  skeletonBlock, errorState, emptyState, sectionHeader,
+  options, formValues, confirmDialog, openModal, closeModal,
+  skeletonBlock, errorState, emptyState, noPermissionState, sectionHeader,
   toast, toastError, withBusy, loadSession
 } from '../core.js'
 import { navigate, setQuery } from '../router.js'
@@ -26,6 +26,7 @@ const TABS = [
   { key: 'preferences', label: 'Preferences', icon: 'fa-sliders' },
   { key: 'security', label: 'Security', icon: 'fa-shield-halved' },
   { key: 'access', label: 'Roles & access', icon: 'fa-users-gear' },
+  { key: 'team', label: 'Team', icon: 'fa-user-group', permission: 'user.manage' },
   { key: 'ai', label: 'AI', icon: 'fa-wand-magic-sparkles' },
   { key: 'data', label: 'Demo data', icon: 'fa-database' },
   { key: 'audit', label: 'Audit log', icon: 'fa-clipboard-list' }
@@ -37,14 +38,17 @@ function obj(value) {
 }
 
 export async function renderSettings(outlet, query) {
-  const tab = TABS.some((t) => t.key === query.tab) ? query.tab : 'profile'
+  // A tab guarded by a permission the role lacks is never offered, so the UI
+  // cannot advertise an action the API would reject with 403.
+  const visibleTabs = TABS.filter((t) => !t.permission || store.can(t.permission))
+  const tab = visibleTabs.some((t) => t.key === query.tab) ? query.tab : 'profile'
 
   outlet.innerHTML = `
     <div class="space-y-4">
       <!-- Tab rail: horizontally scrollable on mobile, no wrapping jumble -->
       <nav class="-mx-4 overflow-x-auto px-4 thin-scroll sm:mx-0 sm:px-0" aria-label="Settings sections">
         <div class="inline-flex gap-1 rounded-lg border border-ink-200 bg-white p-1">
-          ${TABS.map((t) => `
+          ${visibleTabs.map((t) => `
             <button type="button" data-tab="${t.key}"
               class="flex shrink-0 items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition ${
                 t.key === tab ? 'bg-ink-900 text-white' : 'text-ink-600 hover:bg-ink-50'}">
@@ -68,6 +72,7 @@ export async function renderSettings(outlet, query) {
       case 'preferences': await renderPreferences(body, reload); break
       case 'security': renderSecurity(body); break
       case 'access': await renderAccess(body); break
+      case 'team': await renderTeam(body, reload); break
       case 'ai': await renderAi(body, reload); break
       case 'data': await renderDemoData(body, reload); break
       case 'audit': await renderAudit(body, query); break
@@ -425,7 +430,8 @@ function renderSecurity(body) {
           </li>
           <li class="flex gap-2.5">
             <i class="fa-solid fa-circle-check mt-0.5 text-emerald-500"></i>
-            Provider credentials are encrypted at rest and never returned to the browser.
+            Provider credentials live only as server-side secrets — the database stores their name,
+            never their value, and the API returns only whether one is configured.
           </li>
           <li class="flex gap-2.5">
             <i class="fa-solid fa-circle-info mt-0.5 text-ink-400"></i>
@@ -544,12 +550,384 @@ async function renderAccess(body) {
             </li>`).join('')}
         </ul>
         <p class="mt-3 text-xs text-ink-400">
-          Inviting teammates and assigning their roles from the UI arrives in a later phase; the
-          <span class="font-mono">user_roles</span> and <span class="font-mono">role_permissions</span>
-          tables already support it.
+          ${store.can('user.manage')
+            ? 'Add members and assign these roles under the Team tab.'
+            : 'Assigning roles to teammates requires <span class="font-mono">user.manage</span>.'}
         </p>
       </section>
     </div>`
+}
+
+/* ------------------------------------------------------------------ *
+ * Team — members and role assignment
+ * ------------------------------------------------------------------ */
+
+/** Roles a member can hold, sourced from the server's role catalogue. */
+function roleCheckboxes(roles, selected = [], namePrefix = 'role') {
+  const held = new Set(selected)
+  return roles.map((r) => `
+    <label class="flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 transition ${
+      held.has(r.key) ? 'border-brand-300 bg-brand-50' : 'border-ink-200 hover:bg-ink-50'}">
+      <input type="checkbox" name="${namePrefix}" value="${esc(r.key)}"
+        class="mt-0.5 h-4 w-4 rounded border-ink-300 text-brand-600"
+        ${held.has(r.key) ? 'checked' : ''}>
+      <span class="min-w-0">
+        <span class="block text-sm font-medium text-ink-900">${esc(r.name)}</span>
+        <span class="block text-xs text-ink-500">${esc(r.description || '')}</span>
+        <span class="mt-0.5 block text-[11px] text-ink-400">
+          ${fmtNumber(r.permission_count ?? 0)} permission(s)
+        </span>
+      </span>
+    </label>`).join('')
+}
+
+/** Read the checked role keys out of a container. */
+function checkedRoles(scope, namePrefix = 'role') {
+  return [...scope.querySelectorAll(`input[name="${namePrefix}"]:checked`)].map((el) => el.value)
+}
+
+async function renderTeam(body, reload) {
+  if (!store.can('user.manage')) {
+    body.innerHTML = `<div class="card">${noPermissionState('user.manage')}</div>`
+    return
+  }
+
+  const payload = await api.get('/team')
+  const members = payload.data
+  const roles = payload.meta.roles || []
+  const selfId = store.user?.id
+
+  body.innerHTML = `
+    <div class="space-y-4">
+      <section class="card card-pad">
+        ${sectionHeader('Members', {
+          subtitle: `${fmtNumber(members.length)} member(s) in ${esc(store.organization?.name || 'this organization')}`,
+          actions: `
+            <button type="button" class="btn btn-primary btn-sm" data-add-member>
+              <i class="fa-solid fa-user-plus text-xs"></i>Add member
+            </button>`
+        })}
+
+        <ul class="divide-y divide-ink-100">
+          ${members.map((m) => memberRow(m, selfId)).join('')}
+        </ul>
+
+        <p class="mt-3 text-xs text-ink-400">
+          Changing roles or suspending a member revokes their live sessions immediately, so stale
+          permissions can never be reused. An organization always keeps at least one active OWNER.
+        </p>
+      </section>
+
+      <section class="card card-pad">
+        ${sectionHeader('Initial passwords', { subtitle: 'No email delivery in Phase 0' })}
+        <p class="text-sm text-ink-600">
+          You set a member's first password here and share it out-of-band; they change it themselves
+          under <span class="font-medium">Settings → Security</span>. Passwords are stored only as
+          PBKDF2-SHA256 hashes, so they cannot be read back — a forgotten password is reset, not recovered.
+        </p>
+      </section>
+    </div>`
+
+  body.querySelector('[data-add-member]').addEventListener('click', () => openMemberModal(roles, reload))
+
+  body.querySelectorAll('[data-edit-roles]').forEach((btn) =>
+    btn.addEventListener('click', () => {
+      const member = members.find((m) => m.id === btn.dataset.editRoles)
+      if (member) openRolesModal(member, roles, reload)
+    }))
+
+  body.querySelectorAll('[data-reset-pw]').forEach((btn) =>
+    btn.addEventListener('click', () => {
+      const member = members.find((m) => m.id === btn.dataset.resetPw)
+      if (member) openResetPasswordModal(member)
+    }))
+
+  body.querySelectorAll('[data-toggle-status]').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      const member = members.find((m) => m.id === btn.dataset.toggleStatus)
+      if (!member) return
+      const next = member.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE'
+      if (next === 'SUSPENDED') {
+        const confirmed = await confirmDialog({
+          title: `Suspend ${member.name}?`,
+          message: 'They are signed out immediately and cannot sign in until reactivated. Their data is kept.',
+          confirmLabel: 'Suspend',
+          danger: true
+        })
+        if (!confirmed) return
+      }
+      const restore = withBusy(btn, next === 'ACTIVE' ? 'Activating…' : 'Suspending…')
+      try {
+        await api.patch(`/team/${member.id}/status`, { status: next })
+        toast(`${member.name} is now ${titleCase(next)}.`, 'success')
+        await reload()
+      } catch (err) {
+        restore()
+        toastError(err)
+      }
+    }))
+
+  body.querySelectorAll('[data-remove-member]').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      const member = members.find((m) => m.id === btn.dataset.removeMember)
+      if (!member) return
+      const confirmed = await confirmDialog({
+        title: `Remove ${member.name}?`,
+        message: 'Their account, roles and sessions are deleted permanently. Records they created stay in the organization.',
+        confirmLabel: 'Remove',
+        danger: true
+      })
+      if (!confirmed) return
+      const restore = withBusy(btn, 'Removing…')
+      try {
+        await api.del(`/team/${member.id}`)
+        toast(`${member.name} was removed.`, 'success')
+        await reload()
+      } catch (err) {
+        restore()
+        toastError(err)
+      }
+    }))
+}
+
+function memberRow(m, selfId) {
+  const isSelf = m.id === selfId
+  const isOwner = (m.roles || []).includes('OWNER')
+
+  return `
+    <li class="flex flex-col gap-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div class="flex min-w-0 items-start gap-3">
+        <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-ink-100 text-xs font-semibold text-ink-600">
+          ${esc(initials(m.name))}
+        </span>
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span class="text-sm font-medium text-ink-900">${esc(m.name)}</span>
+            ${isSelf ? '<span class="badge bg-brand-50 text-brand-700">You</span>' : ''}
+            ${badge(m.status)}
+          </div>
+          <div class="truncate text-xs text-ink-500">${esc(m.email)}</div>
+          <div class="mt-1 flex flex-wrap items-center gap-1.5">
+            ${(m.roles || []).map((r) => badge(r)).join('')
+              || '<span class="text-xs text-ink-400">No role assigned</span>'}
+            <span class="text-[11px] text-ink-400">· ${fmtNumber(m.permission_count ?? 0)} permission(s)</span>
+          </div>
+          <div class="mt-0.5 text-[11px] text-ink-400">
+            ${m.last_login_at ? `Last sign-in ${fmtRelative(m.last_login_at)}` : 'Never signed in'}
+            · joined ${fmtDateTime(m.created_at)}
+          </div>
+        </div>
+      </div>
+
+      <div class="flex shrink-0 flex-wrap items-center gap-1.5 sm:justify-end">
+        <button type="button" class="btn btn-secondary btn-sm" data-edit-roles="${esc(m.id)}">
+          <i class="fa-solid fa-user-shield text-xs"></i>Roles
+        </button>
+        <button type="button" class="btn btn-secondary btn-sm" data-reset-pw="${esc(m.id)}">
+          <i class="fa-solid fa-key text-xs"></i>Password
+        </button>
+        ${isSelf ? '' : `
+          <button type="button" class="btn btn-secondary btn-sm" data-toggle-status="${esc(m.id)}">
+            <i class="fa-solid ${m.status === 'ACTIVE' ? 'fa-user-slash' : 'fa-user-check'} text-xs"></i>
+            ${m.status === 'ACTIVE' ? 'Suspend' : 'Activate'}
+          </button>
+          <button type="button" class="btn btn-danger btn-sm" data-remove-member="${esc(m.id)}"
+            ${isOwner ? 'title="Removing an OWNER is blocked while they are the last one"' : ''}>
+            <i class="fa-solid fa-trash text-xs"></i>
+          </button>`}
+      </div>
+    </li>`
+}
+
+function openMemberModal(roles, reload) {
+  openModal({
+    title: 'Add member',
+    size: 'xl',
+    body: `
+      <form id="member-form" class="space-y-4" autocomplete="off">
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label class="field-label" for="mb-name">Full name *</label>
+            <input id="mb-name" name="name" class="field-input" required maxlength="120">
+          </div>
+          <div>
+            <label class="field-label" for="mb-email">Email *</label>
+            <input id="mb-email" name="email" type="email" class="field-input" required>
+          </div>
+        </div>
+        <div>
+          <label class="field-label" for="mb-password">Initial password *</label>
+          <input id="mb-password" name="password" type="password" class="field-input"
+            required minlength="8" autocomplete="new-password">
+          <p class="mt-1 text-xs text-ink-400">
+            Minimum 8 characters. Share it securely — the member changes it after signing in.
+          </p>
+        </div>
+        <div>
+          <span class="field-label">Roles *</span>
+          <div class="mt-1 grid gap-2 sm:grid-cols-2" id="mb-roles">
+            ${roleCheckboxes(roles, ['VIEWER'])}
+          </div>
+        </div>
+        <div id="mb-error" class="hidden rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700"></div>
+      </form>`,
+    footer: `
+      <button type="button" class="btn btn-secondary" data-modal-close>Cancel</button>
+      <button type="button" class="btn btn-primary" data-submit>
+        <i class="fa-solid fa-user-plus text-xs"></i>Create member
+      </button>`,
+    onMount: (panel) => {
+      const form = panel.querySelector('#member-form')
+      const errorBox = panel.querySelector('#mb-error')
+      const submit = panel.querySelector('[data-submit]')
+
+      submit.addEventListener('click', async () => {
+        errorBox.classList.add('hidden')
+        const values = formValues(form)
+        const selected = checkedRoles(panel)
+
+        if (!values.name || !values.email || !values.password) {
+          errorBox.textContent = 'Name, email and an initial password are all required.'
+          errorBox.classList.remove('hidden')
+          return
+        }
+        if (values.password.length < 8) {
+          errorBox.textContent = 'The password must be at least 8 characters.'
+          errorBox.classList.remove('hidden')
+          return
+        }
+        if (!selected.length) {
+          errorBox.textContent = 'Select at least one role.'
+          errorBox.classList.remove('hidden')
+          return
+        }
+
+        const restore = withBusy(submit, 'Creating…')
+        try {
+          await api.post('/team', {
+            name: values.name,
+            email: values.email,
+            password: values.password,
+            roles: selected
+          })
+          closeModal()
+          toast(`${values.name} was added to the team.`, 'success')
+          await reload()
+        } catch (err) {
+          restore()
+          errorBox.textContent = err?.message || 'Could not create the member.'
+          errorBox.classList.remove('hidden')
+        }
+      })
+    }
+  })
+}
+
+function openRolesModal(member, roles, reload) {
+  openModal({
+    title: `Roles — ${member.name}`,
+    size: 'xl',
+    body: `
+      <div class="space-y-4">
+        <p class="text-sm text-ink-600">
+          Roles are replaced wholesale. ${esc(member.name.split(' ')[0])} is signed out afterwards so the
+          new permission set applies on the next sign-in.
+        </p>
+        <div class="grid gap-2 sm:grid-cols-2" id="rl-roles">
+          ${roleCheckboxes(roles, member.roles || [])}
+        </div>
+        <div id="rl-error" class="hidden rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700"></div>
+      </div>`,
+    footer: `
+      <button type="button" class="btn btn-secondary" data-modal-close>Cancel</button>
+      <button type="button" class="btn btn-primary" data-submit>Save roles</button>`,
+    onMount: (panel) => {
+      const errorBox = panel.querySelector('#rl-error')
+      const submit = panel.querySelector('[data-submit]')
+
+      submit.addEventListener('click', async () => {
+        errorBox.classList.add('hidden')
+        const selected = checkedRoles(panel)
+        if (!selected.length) {
+          errorBox.textContent = 'Select at least one role.'
+          errorBox.classList.remove('hidden')
+          return
+        }
+
+        const restore = withBusy(submit, 'Saving…')
+        try {
+          await api.patch(`/team/${member.id}/roles`, { roles: selected })
+          closeModal()
+          toast(`Roles updated for ${member.name}.`, 'success')
+          await reload()
+        } catch (err) {
+          restore()
+          errorBox.textContent = err?.message || 'Could not update the roles.'
+          errorBox.classList.remove('hidden')
+        }
+      })
+    }
+  })
+}
+
+function openResetPasswordModal(member) {
+  openModal({
+    title: `Reset password — ${member.name}`,
+    size: 'lg',
+    body: `
+      <form id="rp-form" class="space-y-4" autocomplete="off">
+        <p class="text-sm text-ink-600">
+          Sets a new password immediately and signs ${esc(member.name.split(' ')[0])} out of every device.
+        </p>
+        <div class="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label class="field-label" for="rp-new">New password *</label>
+            <input id="rp-new" name="password" type="password" class="field-input"
+              required minlength="8" autocomplete="new-password">
+          </div>
+          <div>
+            <label class="field-label" for="rp-confirm">Confirm *</label>
+            <input id="rp-confirm" name="confirm" type="password" class="field-input"
+              required minlength="8" autocomplete="new-password">
+          </div>
+        </div>
+        <div id="rp-error" class="hidden rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700"></div>
+      </form>`,
+    footer: `
+      <button type="button" class="btn btn-secondary" data-modal-close>Cancel</button>
+      <button type="button" class="btn btn-primary" data-submit>Reset password</button>`,
+    onMount: (panel) => {
+      const form = panel.querySelector('#rp-form')
+      const errorBox = panel.querySelector('#rp-error')
+      const submit = panel.querySelector('[data-submit]')
+
+      submit.addEventListener('click', async () => {
+        errorBox.classList.add('hidden')
+        const values = formValues(form)
+        if (!values.password || values.password.length < 8) {
+          errorBox.textContent = 'The password must be at least 8 characters.'
+          errorBox.classList.remove('hidden')
+          return
+        }
+        if (values.password !== values.confirm) {
+          errorBox.textContent = 'The password and its confirmation do not match.'
+          errorBox.classList.remove('hidden')
+          return
+        }
+
+        const restore = withBusy(submit, 'Resetting…')
+        try {
+          await api.post(`/team/${member.id}/password`, { password: values.password })
+          closeModal()
+          toast(`Password reset for ${member.name}.`, 'success')
+        } catch (err) {
+          restore()
+          errorBox.textContent = err?.message || 'Could not reset the password.'
+          errorBox.classList.remove('hidden')
+        }
+      })
+    }
+  })
 }
 
 /* ------------------------------------------------------------------ *
